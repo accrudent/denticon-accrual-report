@@ -1,0 +1,5812 @@
+schemaVersion: 3
+meta:
+  sourceVersionId: 019c0692-c52f-7003-813e-8615a7c25a71 # DO NOT CHANGE - Hex uses this to match up project versions when reimporting the file
+  description: ""
+  projectId: 019bc3af-ef0f-7005-b4eb-ca9a503f6f7b # DO NOT CHANGE - Unique ID of the project from which this file was generated
+  title: Template Denticon Accrual Report
+  timezone: null
+  appTheme: SYS_PREF
+  codeLanguage: PYTHON
+  status:
+    name: In development
+  categories: []
+  castDecimalsDefault: true
+  hexType: PROJECT
+  allowExecutionReordering: true
+  prerunApp: false
+  autoRerunApp: true
+  cachePublishedAppState: true
+  logicQueryCacheTimeout: null
+  publishedQueryCacheTimeout: null
+  refreshStalePublishedApp: false
+projectAssets:
+  dataConnections: []
+  envVars: []
+  secrets: []
+sharedAssets:
+  secrets: []
+  vcsPackages: []
+  dataConnections: []
+  externalFileIntegrations: []
+cells:
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f007-7005-b4f6-8b6d2d90d3d5 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Header
+    config:
+      source: |-
+        # Template Denticon Accrual Report
+
+        ## Notes for Devs
+
+        - payment allocation is tied to rpid OID, must use ledger OID
+        - they dont include refund as adjustment for net production
+        - they do not include 'fee - no show' as adjustment for net production- can we add adjustment type for this? maybe fees_coll_adj? 
+
+
+        ## To Do
+        * Build the transactions table
+            * Includes a primary key, also a self referencing key to procedures (if applicable)
+            * Include all procedures from `ledger`
+            * Include everything from `ledgerpayalloc`
+            * Include all payments and procedures from `ledger` not covered by `ledgerpayalloc`
+                * Left joined `ledgerpayalloc` to `ledger`, then subtracted everything from `ledgerpayalloc` and added the remainder to the table. 
+        * Tie out patient balances
+        * Build out enriched claims (proc/submit date, paydate)
+        * Production report - group by month and patient, then by office
+            * This is simple enough we don't need a time filter
+        * AR report
+            * Filtered transaction by date - all transactions happened before the filter date, claims that were submitted but not paid on filter date
+            * Sum up balalnces by procedure
+            * Group by aging
+            * Group by patient
+            * True patient aging
+            * Group by office
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f007-7005-b4f6-917028230d8c # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Dallin Notes Dump
+    config:
+      source: |-
+        ### Dallin's Notes
+
+        ## Database Schema
+
+        * appth - basic appointment table
+        * apptd - ties procedures back to appointments
+        * claimh - basic claim table
+        * claimd - seems to tie ledger entries back to claims
+        * codes - master repo for all dcodes
+        * feescheda - honestly not sure
+        * feeschedh - a list of actual fee schedules
+        * feeschedd - could be the actual fees?
+        * inscoverage - what percentage of what codes are covered by what insurance plans
+        * insplans - details on each ins plan
+        * ledger - all transactions including procedures
+        * ledgerinsd - additional ins details on certain ledger entries
+        * ledgerpayd - ties ledger entries to bank, check, and eob numbers
+        * ledgerpayalloc - ties payments back to procedures
+        * office - each office in denticon (oid)
+        * ogroup - useless
+        * patient - standard patient table
+        * patinsplan - ties patients to insurance plans
+        * payadjust - adjustment types
+        * pgroup - home of pgid, essentially the main group of practices (for most clients there's only one)
+        * provider - basic provider table
+        * respparty - might be the home of rpid?
+        * treatplan - basic treatment plan table
+
+        ### claimh
+        basic claim table. it includes dos date, create date, submit date, and close date
+
+        ### ledger
+        positive means we charged, negative means we got paid
+
+        status is always useless
+
+        ### ledgerpayalloc
+        this is crazy. it connects payments in the ledger to procedures in the ledger, so you can see all of the various procedures that any given payment goes to. 
+
+        ltype:
+        * P - patient payment
+        * S - statement sent (very rare, no amount)
+        * M - claims. never has an amount, updates when the claim is closed, resptype and claimid always populated
+        * N - patients moving accounts (fairly rare, no amounts)
+        * A - adjustment (always has a type2, which indicates either production or collections adjustment) (each of these adjustments also has a code, that could be really useful)
+        * C - completed procedures (always has an amount. patpaid + estins = amount. Also has ucrfee. claimid. dosdate occasionally doesn't match trandate)
+        * I - insurance payment or denial. always has a claimid. 
+
+        Ledger Type: A= Adjustment; C=Charges; I= Insurance Payment; M=Claim Notes line; P=Patient Payment.
+
+        Ledger Type 2: If ledgerType = P or I (type 2: 1 = cash, 2=check,3=creditcard, 4=direct deposit) If ledgerType = A(type 2 : P = production, C = Collection).
+
+        ### respparty
+
+        Responsible parties are something completely different than patients in Denticon, and I kinda like it. A single patient without family has a responsible party that is essentially themselves. 
+
+        ## Basic balance by patient (confirmed accurate)
+        ```sql
+        select pat.fname, pat.lname, pat.oid, bal.patid, bal.bal
+        from (
+            select l.patid, sum(l.amount) bal
+            from denticon.LEDGER l
+            where (ltype = 'I' or ltype = 'P' or ltype = 'C' or ltype = 'A')
+            group by l.patid
+        ) bal
+        left join denticon.patient pat on bal.patid = pat.patid
+        ```
+
+        ## General stuff to do
+
+        I can't see claims, so that will inhibit me from seeing insurance AR
+
+        The ledger is combined across all offices. This isn't a problem, except where patients get treatment done in multiple offices. In that case, I need to balance the patient ledger but also total production for each office. Truly, I should be grouping by responsible party, which will make this even worse. 
+
+        What is the client doing with UCR? Can I factor that in? 
+
+        Responsible party is a weird thing. The RPID is not the same as the PATID. A patient can be their own responsible party, but they have a RPID and a PATID that are different. 
+        - I can fix this by just grouping by patient. The numbers only matter at a practice level, and if I'm totaling up practice numbers then it'll all bleed together. 
+
+        The numbers that are logged as the procedure fee seem low, or UCR is high, or the client is just constantly getting overpaid by insurance for their work. 
+
+        I want a way to date procedure charges and apply patient payments and insurance payments directly to those charges. Then once that's done, I can age the procedures completed and apply any unallocated payments to those procedures beginning with the oldest. 
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f008-7005-b4f6-9e9c36e2ad15 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Denver Notes Dump
+    config:
+      source: |
+        ### Denver's Notes
+
+        #### Please check this query — it returns no data, which confirms that all patient payments (P), insurance payments (I), and adjustments (A) already have corresponding entries in LEDGERPAYALLOC.
+
+        ```sql
+        select top 1000 lpa.[PAYLEDGERID],l.[LEDGERID], l.[LTYPE], l.[TRANDATE], l.[DESCR]
+        from [denticon].[LEDGER] l
+        left join [denticon].[LEDGERPAYALLOC] lpa on l.[LEDGERID] = lpa.[PAYLEDGERID]
+        where lpa.[PAYLEDGERID] is null and l.[TRANDATE] >= '2024-01-01' 
+        and l.[LTYPE] in ('P', 'A', 'I')
+        ```
+
+        #### This one also verifies if all ledger amount for P, A, I equal their ledger pay allocation amount
+
+        ```sql
+        select top 1000 lpa.[PAYLEDGERID],l.[LEDGERID], l.[LTYPE], l.[TRANDATE], l.[DESCR],l.[AMOUNT] as ledger_amount, sum(lpa.[AMOUNT]) as pay_alloc_amount
+        from [denticon].[LEDGER] l
+        left join [denticon].[LEDGERPAYALLOC] lpa on l.[LEDGERID] = lpa.[PAYLEDGERID]
+        where lpa.[PAYLEDGERID] is not null and l.[TRANDATE] >= '2024-01-01' 
+        and l.[LTYPE] in ('P', 'A', 'I')
+        group by lpa.[PAYLEDGERID],l.[LEDGERID], l.[LTYPE], l.[TRANDATE], l.[DESCR],l.[AMOUNT]
+        --having l.[AMOUNT] <> sum(lpa.[AMOUNT])
+        ```
+
+        #### for patient pay, insurance pay, and adjustments that are not connected to the procedure even in ledgerpayalloc, do we want to backdate to earlier procedure?
+
+        PGID - ID of practice group
+        OID - office ID
+        LEDGERID = ledger/transactions primary key
+        RPID ?
+        LTYPE = ledger type 
+        P patient payment  , 
+        I insurance payment, 
+        A adjustment, 
+        S statements?
+        M claims
+        N patient move, just ledger info no amount
+        C procedures.
+        ledger trandate = date data is posted in ledger?
+        providerid = id of provider
+        code = dcode
+        adacode = not sure
+
+
+        estins = insurance estimate 
+        amount = billed amount or ucr
+        patpaid = amout patient paid
+        patadjust = amount patient adjustment
+
+
+        claims linked to transactions ledger.  based on claimid
+        the claim amount is based on UCR, since amount is different from insurance estimate, insurance estimate most likely fee schedule
+
+
+        in ledger
+        they do not write off difference from  amount and insurance estimate, instead it becomes patpaid (patient portion). Thus, AMOUNT = ESTINS + PATCLOSED
+        when insurance pays different (most of the time underpays) amount compared to estins then portion is written off
+
+
+
+
+        ledgerpaymentalloc basically tells how a payment (insurance , patient)  or adjustment is allocated to the procedures.... so 
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f008-7005-b4f6-a40b665da05a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Exploration Cells
+    config:
+      source: "## Exploration Cells"
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-a99c8138172c # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: LEDGER PAY ALLOCATION
+    config:
+      source: |-
+        select  l.[DESCR], sum(lpa.[AMOUNT]) as lpa_amount
+        from denticon.ledgerpayalloc lpa
+        left join [denticon].[LEDGER] l on lpa.[PAYLEDGERID] = l.[LEDGERID]
+        where 1=1 
+        and l.oid = '110'
+        and lpa.[ALLOCDATE] >= '2025-06-01' and lpa.[ALLOCDATE] <= '2025-06-30'
+        and lpa.[LTYPE] = 'A'
+        --and l.[DESCR] not like 'FEE-NO SHOW'
+        --and l.[DESCR] not like '%refund%'
+        group by l.[DESCR]
+        --and l.[DESCR] = 'ADJ OFF - Uncollectable Balanc'
+        --and lpa.PAYLEDGERID = '10702760'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_18
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADACODE
+            renameTo: null
+            size: 106
+            wrapText: null
+            displayFormat: null
+          - originalName: ALLOCDATE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: AMOUNT
+            renameTo: null
+            size: 174
+            wrapText: null
+            displayFormat: null
+          - originalName: BATCHID
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: BILLINGORDER
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTYPE
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: CODE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: CONTRACTTYPE
+            renameTo: null
+            size: 141
+            wrapText: null
+            displayFormat: null
+          - originalName: CPTCODE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDBY
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDON
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: DATE_TIME_INSERTED
+            renameTo: null
+            size: 242
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 181
+            wrapText: null
+            displayFormat: null
+          - originalName: DURATION
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINS
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD1
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD2
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD3
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD4
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: INSPLANID
+            renameTo: null
+            size: 115
+            wrapText: null
+            displayFormat: null
+          - originalName: LASTCHANGEDON
+            renameTo: null
+            size: 152
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDBY
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIER
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PAYALLOCID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PAYLEDGERID
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: POS
+            renameTo: null
+            size: 75
+            wrapText: null
+            displayFormat: null
+          - originalName: PROCLEDGERID
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: PROVIDERID
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: STATUS
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: SURF
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: TH
+            renameTo: null
+            size: 67
+            wrapText: null
+            displayFormat: null
+          - originalName: TOS
+            renameTo: null
+            size: 74
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: UNIT
+            renameTo: null
+            size: 80
+            wrapText: null
+            displayFormat: null
+          - originalName: lpa_amount
+            renameTo: null
+            size: 185
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            AMOUNT:
+              - Sum
+            lpa_amount:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-b3817960f73c # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Raw Transaction Explorer
+    config:
+      source: |-
+        select 
+            [DESCR],
+            sum([AMOUNT]) as total_amount
+        from denticon.ledger 
+        where 1=1
+        -- and [LEDGERID] = '9005292'
+        -- and [PATID] = '9070680'
+        -- [ESTINS] is not null
+        -- and [ESTINS] <> [AMOUNT] 
+        -- and [ESTINS] = 0
+        --[APPTDID] is not null
+        --and ltype in ( 'I', 'P', 'C', 'A')
+        and ltype = 'A'
+        and OID = '110'
+        and [TRANDATE] >= '2025-03-1' and [TRANDATE] <= '2025-03-31'
+        and [DESCR] not like '%refund%'
+        --and [LEDGERID] = '10685241'
+        group by [DESCR]
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADACODE
+            renameTo: null
+            size: 106
+            wrapText: null
+            displayFormat: null
+          - originalName: AMOUNT
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: BILLINGORDER
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: CODE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: CPTCODE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 311
+            wrapText: null
+            displayFormat: null
+          - originalName: DURATION
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINS
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD1
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD2
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD3
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD4
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIER
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: NOTES
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: POS
+            renameTo: null
+            size: 75
+            wrapText: null
+            displayFormat: null
+          - originalName: PROVIDERID
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: STATUS
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: SURF
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: TH
+            renameTo: null
+            size: 67
+            wrapText: null
+            displayFormat: null
+          - originalName: TOS
+            renameTo: null
+            size: 74
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: UNIT
+            renameTo: null
+            size: 80
+            wrapText: null
+            displayFormat: null
+          - originalName: office_total
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: total_amount
+            renameTo: null
+            size: 170
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            AMOUNT:
+              - Sum
+            ESTINS:
+              - Sum
+            PATPAID:
+              - Sum
+            PATADJUST:
+              - Sum
+            total_amount:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-bf1f31bef6eb # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Ledger Inspect helper
+    config:
+      source: |
+        select 
+          *
+        from denticon.ledger 
+        where 1=1
+        -- and [LEDGERID] = '9005292'
+        -- and [PATID] = '9070680'
+        -- [ESTINS] is not null
+        -- and [ESTINS] <> [AMOUNT] 
+        -- and [ESTINS] = 0
+        --[APPTDID] is not null
+        --and ltype in ( 'I', 'P', 'C', 'A')
+        and ltype = 'A'
+        and OID = '110'
+        and [TRANDATE] >= '2024-12-1' and [TRANDATE] <= '2024-12-31'
+        and [DESCR] = 'ADJ OFF - Uncollectable Balanc'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_62
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADACODE
+            renameTo: null
+            size: 106
+            wrapText: null
+            displayFormat: null
+          - originalName: AMOUNT
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: BILLINGORDER
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: CODE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: CPTCODE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 208
+            wrapText: null
+            displayFormat: null
+          - originalName: DURATION
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINS
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD1
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD2
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD3
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: ICD4
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIER
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PATPAID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: POS
+            renameTo: null
+            size: 75
+            wrapText: null
+            displayFormat: null
+          - originalName: PROVIDERID
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: STATUS
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: SURF
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: TH
+            renameTo: null
+            size: 67
+            wrapText: null
+            displayFormat: null
+          - originalName: TOS
+            renameTo: null
+            size: 74
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: UNIT
+            renameTo: null
+            size: 80
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 47
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            AMOUNT:
+              - Sum
+            ESTINS:
+              - Sum
+            PATPAID:
+              - Sum
+            PATADJUST:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-c3bb37ee7fc7 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Adjustment Inspector
+    config:
+      source: |-
+        -- * ucr_writeoffs
+        -- * ins_adj
+        -- * discount_adj
+        -- * payplan_adj
+        -- * patrefund_adj
+        -- * insrefund_adj
+        -- * unknown_adj
+
+
+        select top 200 
+            l.[LTYPE], 
+            l.[CODE], 
+            l.[DESCR], 
+            sum(l.[AMOUNT]) as total
+        from [denticon].[LEDGER] l
+        where l.[LTYPE] in ('A')
+        and l.[DESCR] not like 'INSURANCE RECOUPMENT' --insrefund_adj
+        and l.[DESCR] not like '%ins%' --insurance adjustment
+        and l.[DESCR] not like 'ADJ OFF - Courtesy Discount' --discount
+        and l.[DESCR] not like 'ADJ OFF - Uncollectable Balanc' --bad debt
+        and l.[DESCR] not like 'ADJ OFF - Coupon' --discount
+        and l.[DESCR] not like 'ADJ OFF - Failed Treatment' --discount
+        and l.[DESCR] not like 'ADJ OFF - Treatment Incomplete' --discount
+        and l.[DESCR] not like 'REFUND - Voided' --discount
+        and l.[DESCR] not like 'ADJ OFF - Bad Debt' --bad debt
+        and l.[DESCR] not like 'REFUND - Voided' --discount
+        and l.[DESCR] not like 'ADJ OFF - Special Promotion' --discount
+        and l.[DESCR] not like 'OrthoFX- Promo Discount' --discount
+        and l.[DESCR] not like 'REFUND - Patient' --patrefund_adj
+        and l.[DESCR] not like 'REFUND - 3rd Party Finance' --patrefund_adj
+        and l.[DESCR] not like 'REFUND - Credit Card' --patrefund_adj
+
+
+
+        group by l.[LTYPE], l.[CODE], l.[DESCR]
+        order by abs(sum(l.[AMOUNT])) desc
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_12
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: CODE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 311
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: total
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            total:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-c9f4a9e78fd1 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Patient Inspector
+    config:
+      source: |-
+        select top 5 p.[PATID], p.[RPID],  p.[LNAME], p.[FNAME],p.[FIRSTVISITDATE], p.[BALANCE]
+        from [denticon].[PATIENT] p
+        left join [denticon].[OFFICE] o on p.pgid = o.pgid and p.[OID] = o.[OID]
+        where p.[RPID] = '9055296' 
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_7
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADDRESS
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: ADDRESS2
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: BALANCE
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: BILLINGSYSTEM
+            renameTo: null
+            size: 142
+            wrapText: null
+            displayFormat: null
+          - originalName: BIRTHDATE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: CELLPHONE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: CHARTNO
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: CITY
+            renameTo: null
+            size: 78
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDBY
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DATEACTIVATE
+            renameTo: null
+            size: 135
+            wrapText: null
+            displayFormat: null
+          - originalName: DRVLICNO_OLD
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: EMAIL
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: FIRSTVISITDATE
+            renameTo: null
+            size: 144
+            wrapText: null
+            displayFormat: null
+          - originalName: FNAME
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: HOMEPHONE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: LNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: MAXOFFICES
+            renameTo: null
+            size: 125
+            wrapText: null
+            displayFormat: null
+          - originalName: MEDICAIDID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: MI
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: MSTATUS
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: NICKNAME
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: PGNAME
+            renameTo: null
+            size: 148
+            wrapText: null
+            displayFormat: null
+          - originalName: PHONE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: PHONE2
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: SEX
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: SSN
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: STATE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: STATUS
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: TITLE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: USEDOFFICES
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: WORKPHONE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ZIP
+            renameTo: null
+            size: 71
+            wrapText: null
+            displayFormat: null
+          - originalName: patid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 39
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-d465746a987a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Responsible Party Inspector
+    config:
+      source: |-
+        select top 50 * 
+        from [denticon].[RESPPARTY]
+        where rpid = '6000240'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_48
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADDRESS
+            renameTo: null
+            size: 269
+            wrapText: null
+            displayFormat: null
+          - originalName: ADDRESS2
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: BIRTHDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CELLPHONE
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: CITY
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: DRVLICNO
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: EMAIL
+            renameTo: null
+            size: 144
+            wrapText: null
+            displayFormat: null
+          - originalName: FNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: HOMEPHONE
+            renameTo: null
+            size: 125
+            wrapText: null
+            displayFormat: null
+          - originalName: ISFINCHARGE
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ISSENDCOLL
+            renameTo: null
+            size: 122
+            wrapText: null
+            displayFormat: null
+          - originalName: ISSENDSTMT
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ISSTMTONLINEONLY
+            renameTo: null
+            size: 166
+            wrapText: null
+            displayFormat: null
+          - originalName: LNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: MI
+            renameTo: null
+            size: 66
+            wrapText: null
+            displayFormat: null
+          - originalName: MSTATUS
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: NICKNAME
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: SEX
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: SSN
+            renameTo: null
+            size: 74
+            wrapText: null
+            displayFormat: null
+          - originalName: STATE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: TITLE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: WORKPHONE
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: ZIP
+            renameTo: null
+            size: 71
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-ddef5a4308c5 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: ledger vs pay_alloc
+    config:
+      source: |-
+        select top 1000 
+            lpa.[PAYLEDGERID],
+            l.[LEDGERID], 
+            l.[LTYPE], 
+            l.[TRANDATE], 
+            l.[DESCR],
+            l.[AMOUNT] as ledger_amount, 
+            sum(lpa.[AMOUNT]) as pay_alloc_amount
+        from [denticon].[LEDGER] l
+        left join [denticon].[LEDGERPAYALLOC] lpa on l.[LEDGERID] = lpa.[PAYLEDGERID]
+        where 1=1
+        -- and lpa.[PAYLEDGERID] is not null 
+        -- and l.[TRANDATE] >= '2025-01-01' 
+        and l.[LTYPE] in ('P', 'A', 'I')
+        group by 
+            lpa.[PAYLEDGERID],
+            l.[LEDGERID], 
+            l.[LTYPE], 
+            l.[TRANDATE], 
+            l.[DESCR],
+            l.[AMOUNT]
+        having l.[AMOUNT] != sum(lpa.[AMOUNT])
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_17
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ALLOCDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: AMOUNT
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: BATCHID
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTYPE
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDBY
+            renameTo: null
+            size: 135
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 182
+            wrapText: null
+            displayFormat: null
+          - originalName: INSPLANID
+            renameTo: null
+            size: 115
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDBY
+            renameTo: null
+            size: 135
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PAYALLOCID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PAYLEDGERID
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: PROCLEDGERID
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: PROVIDERID
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: ledger_amount
+            renameTo: null
+            size: 133
+            wrapText: null
+            displayFormat: null
+          - originalName: pay_alloc_amount
+            renameTo: null
+            size: 150
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-e15a300fdee1 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: ledger list of transactions
+    config:
+      source: |-
+        select l.[LEDGERID], rp.[FNAME] as rpfname, rp.[LNAME] as rplname,l.[PATID], p.[LNAME], p.[FNAME], l.[LTYPE],l.[CLAIMID], l.[DESCR], l.[TRANDATE],l.[DOSDATE], l.[AMOUNT], l.[ESTINS]
+        from [denticon].[LEDGER] l
+        left join [denticon].[PATIENT] p on l.[PATID] = p.[PATID]
+        left join [denticon].[RESPPARTY] rp on l.rpid = rp.rpid 
+        where 
+        --[LEDGERID] = '9439053'
+        l.[RPID] = '9045308'
+        and l.[LTYPE] = 'C'
+        --and l.[TRANDATE] >= '2024-01-01'
+        order by l.[PATID]
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_24
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: 649
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: DOSDATE
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADDRESS
+            renameTo: null
+            size: 141
+            wrapText: null
+            displayFormat: null
+          - originalName: ADDRESS2
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: AMOUNT
+            renameTo: null
+            size: 180
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: BIRTHDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CELLPHONE
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: CITY
+            renameTo: null
+            size: 100
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 310
+            wrapText: null
+            displayFormat: null
+          - originalName: DOSDATE
+            renameTo: null
+            size: 226
+            wrapText: null
+            displayFormat: null
+          - originalName: EMAIL
+            renameTo: null
+            size: 192
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINS
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: FIRSTVISITDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: FNAME
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: HOMEPHONE
+            renameTo: null
+            size: 125
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: LNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: LTYPE
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: MI
+            renameTo: null
+            size: 66
+            wrapText: null
+            displayFormat: null
+          - originalName: MSTATUS
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: NICKNAME
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: SEX
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: SSN
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: STATE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: TITLE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 253
+            wrapText: null
+            displayFormat: null
+          - originalName: WORKPHONE
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: ZIP
+            renameTo: null
+            size: 71
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: rpfname
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: rplname
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            AMOUNT:
+              - Sum
+            ESTINS:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-efe099234d91 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Patients with 0 balance 2024 to present
+    config:
+      source: |-
+        select [PATID],[LNAME], [FNAME], [BALANCE]
+        from [denticon].[PATIENT]
+        where [BALANCE] = 0 and [FIRSTVISITDATE] >= '2024-01-01'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_25
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADDRESS
+            renameTo: null
+            size: 161
+            wrapText: null
+            displayFormat: null
+          - originalName: ADDRESS2
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: BALANCE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: BIRTHDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CELLPHONE
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: CITY
+            renameTo: null
+            size: 78
+            wrapText: null
+            displayFormat: null
+          - originalName: DRVLICNO_OLD
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: EMAIL
+            renameTo: null
+            size: 87
+            wrapText: null
+            displayFormat: null
+          - originalName: FNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: HOMEPHONE
+            renameTo: null
+            size: 125
+            wrapText: null
+            displayFormat: null
+          - originalName: LNAME
+            renameTo: null
+            size: 91
+            wrapText: null
+            displayFormat: null
+          - originalName: MI
+            renameTo: null
+            size: 66
+            wrapText: null
+            displayFormat: null
+          - originalName: MSTATUS
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: NICKNAME
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: SEX
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: SSN
+            renameTo: null
+            size: 74
+            wrapText: null
+            displayFormat: null
+          - originalName: STATE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: TITLE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: WORKPHONE
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: ZIP
+            renameTo: null
+            size: 71
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 39
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-f12436aabb83 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Raw Claims Inspector
+    config:
+      source: |-
+        select *
+        from denticon.claimh
+        where 1=1
+        -- and [CLAIMID] = '580'
+        and cast(claimsentdate as date) = '2025-06-27'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_41
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: BILLINGORDER
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: BILLPRDR
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: CARRIERID
+            renameTo: null
+            size: 115
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMAMT
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTTYPE
+            renameTo: null
+            size: 146
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSTATUS
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTYPE
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINSAMT
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: FIRSTVISITDATE
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: ISECLAIM
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: ISOCCILLNESS
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ISPREAUTH
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: LASTCHANGEDON
+            renameTo: null
+            size: 206
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: OTHERACC
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: PLACEOFSERVICE
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: PREAUTHNO
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: RECVDAMT
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+          - originalName: RESPPLANID
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: TREATPRDR
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 39
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            RECVDAMT:
+              - Sum
+            ESTINSAMT:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50e-fda15bb5ae87 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Raw ClaimD Inspect
+    config:
+      source: |-
+        select *
+        from [denticon].[CLAIMD] 
+        where [CLAIMID] = '580'
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_42
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: CLAIMBATCHID
+            renameTo: null
+            size: 138
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTEXT
+            renameTo: null
+            size: 400
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTYPE
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDBY
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: CREATEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DATE_TIME_INSERTED
+            renameTo: null
+            size: 242
+            wrapText: null
+            displayFormat: null
+          - originalName: ISPREAUTH
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: LASTCHANGEDON
+            renameTo: null
+            size: 152
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDBY
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDON
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: NUMLINES
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: STATUS
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: TOTALCHARGES
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 39
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-02c820eda00e # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Claim with multiple claimtype
+    config:
+      source: |
+        select 
+            claimid,
+            patid,
+            claimtype,
+            oid,
+            claimstatus,
+            claimdosdate,
+            claimsentdate,
+            claimclosedate,
+            claimsenttype,
+            claimucr,
+            claimamt,
+            estinsamt,
+            recvdamt,
+            isactive,
+            count(*) over(partition by claimid) as duplicate_count
+        from denticon.claimh
+        -- group by [CLAIMID]
+        -- having count(*) > 1
+        order by duplicate_count desc, claimdosdate desc, claimid, claimsentdate
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_35
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: BILLINGORDER
+            renameTo: null
+            size: 137
+            wrapText: null
+            displayFormat: null
+          - originalName: BILLPRDR
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: CARRIERID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMAMT
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTTYPE
+            renameTo: null
+            size: 146
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSTATUS
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMTYPE
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINSAMT
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: ISECLAIM
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: ISPREAUTH
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: LEDGERID
+            renameTo: null
+            size: 109
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: RECVDAMT
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+          - originalName: RESPPLANID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: TREATPRDR
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: claimamt
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: claimclosedate
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: claimdosdate
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: claimid
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: claimsentdate
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: claimsenttype
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat: null
+          - originalName: claimstatus
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+          - originalName: claimtype
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: claimucr
+            renameTo: null
+            size: 98
+            wrapText: null
+            displayFormat: null
+          - originalName: duplicate_count
+            renameTo: null
+            size: 138
+            wrapText: null
+            displayFormat: null
+          - originalName: estinsamt
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: isactive
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: oid
+            renameTo: null
+            size: 69
+            wrapText: null
+            displayFormat: null
+          - originalName: patid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: recvdamt
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 39
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-0f36d798ef2a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Enriched Claims (old)
+    config:
+      source: |-
+        -- Denver, I'm leaving this one here for now so you can see the comments we left on it. 
+
+        -- select
+        -- c.claimid, 
+        -- max(c.[PATID]) [PATID], 
+        -- max(c.[RPID]) [RPID], 
+        -- max(c.[OID]) [OID],
+        -- max(c.[CLAIMSTATUS]) state,
+        -- max(c.[CLAIMDOSDATE]) CLAIMDOSDATE, 
+        -- max(c.[CLAIMSENTDATE]) [CLAIMSENTDATE],
+        -- max(c.[MODIFIEDON]) as [UPDATE_DATE],
+        -- max(c.[CLAIMAMT]) as CLAIMAMT, --when claim is sent multiple times, claim amount is declared whole everytime, so we dont want to sum this but instead get max since that is what is owed
+        -- sum(c.[ESTINSAMT]) as [ESTINSAMT], --but for this, since insurance estimate is allocated to the primary, secondary, and/or tertiary insurance, we sum since it is already allocated
+        -- sum(c.[RECVDAMT]) as [RECVDAMT] --we also sum this because the primary, secondary, and/or tertiary insurance will only send their portion making up for the total amount owed
+        -- from [denticon].[CLAIMH] c
+        -- group by c.[CLAIMID]
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: prelim_claim
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: CLAIMAMT
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMDOSDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DOSDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINSAMT
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: PAYDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: RECVDAMT
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: UPDATE_DATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: _1
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: _2
+            renameTo: null
+            size: 66
+            wrapText: null
+            displayFormat: null
+          - originalName: claimid
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ledgerid
+            renameTo: null
+            size: 96
+            wrapText: null
+            displayFormat: null
+          - originalName: oid
+            renameTo: null
+            size: 69
+            wrapText: null
+            displayFormat: null
+          - originalName: patid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: rpid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: state
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-107b354437a1 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Pre Auths (kinda)
+    config:
+      source: |-
+        select top 50 
+            c.claimid claimid, 
+            l.[CLAIMID] ledger_claimid, 
+            c.patid, 
+            c.rpid, 
+            c.oid, 
+            c.[CLAIMSTATUS], 
+            c.[CLAIMDOSDATE], 
+            c.[CLAIMSENTDATE], 
+            c.[MODIFIEDON], 
+            c.[CLAIMAMT], 
+            c.[ESTINSAMT], 
+            c.[RECVDAMT],
+            c.ispreauth
+        from [denticon].[CLAIMH] c
+        left join [denticon].[LEDGER] l on c.[CLAIMID] = l.[CLAIMID]
+        where l.[CLAIMID] is null and [RECVDAMT] <> 0
+        --and [CLAIMSENTDATE] > '2025-09-01' 
+        order by claimsentdate desc
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_59
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: CLAIMAMT
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMDOSDATE
+            renameTo: null
+            size: 140
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMID
+            renameTo: null
+            size: 101
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSENTDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CLAIMSTATUS
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: ESTINSAMT
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: MODIFIEDON
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: RECVDAMT
+            renameTo: null
+            size: 114
+            wrapText: null
+            displayFormat: null
+          - originalName: claimid
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ispreauth
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: ledger_claimid
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat: null
+          - originalName: oid
+            renameTo: null
+            size: 69
+            wrapText: null
+            displayFormat: null
+          - originalName: patid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: rpid
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f008-7005-b4f6-ad809826084c # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Reports
+    config:
+      source: |
+        ## Data Definitions
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-19210a59ae7d # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Enriched Claims
+    config:
+      source: |-
+        select 
+            concat(c.claimid, '_', c.claimtype) as warehouse_id,
+            cast(c.rpid as varchar) as guar_id,
+            cast(c.oid as varchar) as location_id, 
+            (case -- trying to recreate the claim state
+                when c.claimstatus = 'P' or c.claimstatus = 'Q' then 'CREATED'
+                when c.claimstatus = 'S' then 'SUBMITTED' 
+                when c.claimstatus = 'C' then 'CLOSED'
+                else c.claimstatus 
+            end) state,
+            c.claimdosdate as proc_time,
+            c.claimsentdate as submit_time,
+            (select max(ll.[TRANDATE]) from denticon.[LEDGER] ll where ll.[CLAIMID] = c.[CLAIMID] and ll.[LTYPE] = 'I') as pay_time, --getting max transaction date tied to claim 
+            c.claimclosedate as close_time,
+            c.modifiedon as update_time, 
+            c.claimamt as total_billed_amount, 
+            c.estinsamt as estimated_insurance_payment, 
+            c.recvdamt as total_paid_amount
+        from denticon.claimh c
+        where ispreauth != 1
+        order by warehouse_id
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: enriched_claims
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: close_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: estimated_insurance_payment
+            renameTo: null
+            size: 219
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: guar_id
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: kolla_id
+            renameTo: null
+            size: 95
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pay_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: proc_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: state
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: submit_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: total_billed_amount
+            renameTo: null
+            size: 161
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: total_paid_amount
+            renameTo: null
+            size: 158
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: update_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: warehouse_id
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-27c070121f6e # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Transactions
+    config:
+      source: |-
+        select 
+            cast(l.ledgerid as varchar) as warehouse_id, --just ledger id if procedure
+            cast(l.rpid as varchar) as guar_id,
+            cast(l.oid as varchar) as location_id, 
+            null as t_id,
+            cast(l.dosdate as date) as proc_time,
+            cast(l.trandate as date) as tran_time,
+            cast(l.trandate as date) as eff_time,
+            'proc' as tran_type, -- simplified this, because we are already filtering out just procedures
+            l.amount
+        from denticon.ledger l
+        where l.[LTYPE] in ('C')
+
+        union all
+
+        select 
+            cast(lpa.payallocid as varchar) as warehouse_id, --if P, I, A, payallocid as id
+            cast(lpa.rpid as varchar) as guar_id,
+            cast(l.oid as varchar) as location_id, 
+            cast(lpa.procledgerid as varchar) as t_id, --ties pay/payalloc to procedure, null if procledgerid is null
+            cast(ll.dosdate as date) as proc_time, --ties pay/payalloc to procedure date, null if procledgerid is null
+            cast(l.trandate as date) as tran_time,
+            cast(l.trandate as date) as eff_time,
+            case
+                when lpa.ltype = 'P' then 'pat_pay'
+                when lpa.ltype = 'I' then 'ins_pay'
+
+                when lpa.ltype = 'A' and l.[DESCR] like 'INSURANCE RECOUPMENT' then 'insrefund_adj' --insurance refund
+
+                when lpa.ltype = 'A' and l.[DESCR] like '%ins%' then 'ins_adj' --insurance adjustment
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Contract Adjustments' then 'ins_adj' --insurance adjustment
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Ins Agreement' then 'ins_adj' --insurance adjustment
+                when lpa.ltype = 'A' and l.[DESCR] like 'AUTO - Insurance Adjustment(P)' then 'ins_adj' --insurance adjustment
+
+                when lpa.ltype = 'A' and l.[DESCR] like 'FEE-NO SHOW' then 'fees_adj' --temporary 
+
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Courtesy Discount' then 'discount_adj' --discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Uncollectable Balanc' then 'bd_adj' --bad debt
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Coupon' then 'discount_adj' --discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Failed Treatment' then 'discount_adj' --discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Treatment Incomplete'then 'discount_adj' --discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'REFUND - Voided' then 'discount_adj' --discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Bad Debt' then 'bd_adj' --bad debt
+                when lpa.ltype = 'A' and l.[DESCR] like 'ADJ OFF - Special Promotion' then 'discount_adj'--discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'OrthoFX- Promo Discount' then 'discount_adj'--discount
+                when lpa.ltype = 'A' and l.[DESCR] like 'REFUND - Patient' then 'patrefund_adj'--patrefund_adj
+                when lpa.ltype = 'A' and l.[DESCR] like 'REFUND - 3rd Party Finance' then 'patrefund_adj'--patrefund_adj
+                when lpa.ltype = 'A' and l.[DESCR] like 'REFUND - Credit Card' then 'patrefund_adj'--patrefund_adj
+
+                else 'unknown_adj' 
+            end as tran_type,
+            lpa.amount
+        from [denticon].[LEDGERPAYALLOC] lpa
+        left join [denticon].[LEDGER] l on lpa.[PAYLEDGERID] = l.[LEDGERID] --P, I, A
+        left join [denticon].[LEDGER] ll on lpa.[PROCLEDGERID] = ll.[LEDGERID] --procedures
+        where lpa.ltype in ('P', 'I', 'A')
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: trans
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: amount
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: assigned_trans
+            renameTo: null
+            size: 134
+            wrapText: null
+            displayFormat: null
+          - originalName: custom_type
+            renameTo: null
+            size: 122
+            wrapText: null
+            displayFormat: null
+          - originalName: eff_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: id
+            renameTo: null
+            size: 100
+            wrapText: null
+            displayFormat: null
+          - originalName: kolla_id
+            renameTo: null
+            size: 95
+            wrapText: null
+            displayFormat: null
+          - originalName: ledgerid
+            renameTo: null
+            size: 100
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: oid
+            renameTo: null
+            size: 69
+            wrapText: null
+            displayFormat: null
+          - originalName: patid
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: proc_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: proc_trime
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 28
+            wrapText: null
+            displayFormat: null
+          - originalName: t_id
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: tran_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: tran_type
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: warehouse_id
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-29bb634fcdd0 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Patients
+    config:
+      source: |
+        -- select
+        -- p.patid name,
+        -- '' type,
+        -- p.[STATE] state,
+        -- p.[RPID] guarantor,
+        -- '' remote_id,
+        -- p.[BIRTHDATE] birth_date,
+        -- p.[FNAME] given_name,
+        -- p.[LNAME] family_name,
+        -- p.[FIRSTVISITDATE] first_visit,
+        -- p.oid location_id,
+        -- rp.[FNAME] rp_fname,
+        -- rp.[LNAME] rp_lname
+        -- from [denticon].[PATIENT] p
+        -- left join [denticon].[RESPPARTY] rp on p.[RPID] = rp.[RPID]
+
+        select 
+        rp.[RPID] guarantor,
+        rp.[STATE] state,
+        rp.rpid remote_id,
+        rp.[BIRTHDATE] birth_date,
+        rp.[FNAME] given_name,
+        rp.[LNAME] family_name,
+        rp.[OID] location_id
+        from [denticon].[RESPPARTY] rp
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: patients
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ADDRESS
+            renameTo: null
+            size: 163
+            wrapText: null
+            displayFormat: null
+          - originalName: ADDRESS2
+            renameTo: null
+            size: 111
+            wrapText: null
+            displayFormat: null
+          - originalName: BIRTHDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: CELLPHONE
+            renameTo: null
+            size: 118
+            wrapText: null
+            displayFormat: null
+          - originalName: CITY
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: EMAIL
+            renameTo: null
+            size: 186
+            wrapText: null
+            displayFormat: null
+          - originalName: FNAME
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: HOMEPHONE
+            renameTo: null
+            size: 125
+            wrapText: null
+            displayFormat: null
+          - originalName: LNAME
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: MI
+            renameTo: null
+            size: 66
+            wrapText: null
+            displayFormat: null
+          - originalName: MSTATUS
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: NICKNAME
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: OID
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: PATID
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+          - originalName: PGID
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: RPID
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: SEX
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: SSN
+            renameTo: null
+            size: 88
+            wrapText: null
+            displayFormat: null
+          - originalName: STATE
+            renameTo: null
+            size: 86
+            wrapText: null
+            displayFormat: null
+          - originalName: TITLE
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: WORKPHONE
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: ZIP
+            renameTo: null
+            size: 71
+            wrapText: null
+            displayFormat: null
+          - originalName: birth_date
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: family_name
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: first_visit
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: given_name
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: guarantor
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: name
+            renameTo: null
+            size: 83
+            wrapText: null
+            displayFormat: null
+          - originalName: remote_id
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: rp_fname
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: rp_lname
+            renameTo: null
+            size: 103
+            wrapText: null
+            displayFormat: null
+          - originalName: state
+            renameTo: null
+            size: 79
+            wrapText: null
+            displayFormat: null
+          - originalName: type
+            renameTo: null
+            size: 76
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-37510b2c2c27 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Offices
+    config:
+      source: |-
+        select
+            oid,
+            officename
+        from denticon.office
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: offices
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: officename
+            renameTo: null
+            size: 191
+            wrapText: null
+            displayFormat: null
+          - originalName: oid
+            renameTo: null
+            size: 70
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: CODE
+    cellId: 019bc3af-f036-7005-b4f8-ea2582a87ba8 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Python Variable Definitions
+    config:
+      source: |-
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        from dateutil import parser
+
+        today = date.today()
+
+        focus_month = today.replace(day=1)
+        focus_month_name = focus_month.strftime("%b")
+
+        month_p1 = focus_month + relativedelta(months=1)
+        month_p1_name = month_p1.strftime("%b")
+
+        month_m1 = focus_month - relativedelta(months=1)
+        month_m1_name = month_m1.strftime("%b")
+
+        month_m2 = focus_month - relativedelta(months=2)
+        month_m2_name = month_m2.strftime("%b")
+
+        month_m3 = focus_month - relativedelta(months=3)
+        month_m3_name = month_m3.strftime("%b")
+
+        month_m4 = focus_month - relativedelta(months=4)
+        month_m4_name = month_m4.strftime("%b")
+
+        month_m5 = focus_month - relativedelta(months=5)
+        month_m5_name = month_m5.strftime("%b")
+
+        month_m6 = focus_month - relativedelta(months=6)
+        month_m6_name = month_m6.strftime("%b")
+
+        payment_types = ['ins_pay', 'pat_pay', 'ucr_writeoff']
+        adj_prod_types = ['proc', 'bd_adj', 'discount_adj', 'payplan_adj', 'patrefund_adj', 'insrefund_adj', 'unknown_adj'] # not including 'ucr_writeoff' here, because we're treating those as part of insurance payments
+  - cellType: INPUT
+    cellId: 019bc3af-f03a-7005-b4f9-056e847e50d5 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Prod Limit
+    config:
+      inputType: DATE
+      name: prod_limit
+      outputType: DATETIME
+      options:
+        enableTime: false
+        showRelativeDates: true
+        useDateRange: true
+      defaultValue:
+        - unit: YEAR
+          amount: 2
+          timezone: America/Denver
+          operation: AGO
+          displayName: Past 2 years
+        - unit: DAY
+          amount: 0
+          timezone: America/Denver
+          operation: AGO
+          displayName: today
+  - cellType: INPUT
+    cellId: 019bc3af-f03a-7005-b4f9-0b781b0e756a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR Date
+    config:
+      inputType: DATE
+      name: ar_date
+      outputType: DATETIME
+      options:
+        enableTime: false
+        showRelativeDates: true
+        dynamicDefault:
+          variableName: focus_month
+        useDateRange: false
+      defaultValue: null
+  - cellType: MARKDOWN
+    cellId: 019bc3af-f008-7005-b4f6-b7850d31141a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Reports
+    config:
+      source: "## Reports"
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-39f7e3a0dae9 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: PROD - Patient Balances
+    config:
+      source: |-
+        --might need to group by oid also if some patient visit multiple practice
+
+        select
+            strftime(t.eff_time, '%Y-%m') as eff_month,
+            max(p.given_name) given_name,
+            max(p.family_name) family_name,
+            t.guar_id,
+            t.location_id,
+            round(sum(case when t.tran_type = 'proc' then t.amount else 0 end), 2) prod,
+            round(sum(case when t.tran_type = 'ucr_writeoff' then t.amount else 0 end), 2) ucr_writeoff,
+            round(sum(case when t.tran_type = 'ins_adj' then t.amount else 0 end), 2) ins_adj,
+            round(sum(case when t.tran_type = 'discount_adj' then t.amount else 0 end), 2) discount_adj,
+            round(sum(case when t.tran_type = 'bd_adj' then t.amount else 0 end), 2) bd_adj,
+            round(sum(case when t.tran_type = 'payplan_adj' then t.amount else 0 end), 2) payplan_adj,
+            round(sum(case when t.tran_type = 'patrefund_adj' then t.amount else 0 end), 2) patrefund_adj,
+            round(sum(case when t.tran_type = 'insrefund_adj' then t.amount else 0 end), 2) insrefund_adj,
+            round(sum(case when t.tran_type = 'unknown_adj' then t.amount else 0 end), 2) unknown_adj,
+            round(sum(case when t.tran_type = 'ins_pay' then t.amount else 0 end), 2) ins_pay,
+            round(sum(case when t.tran_type = 'pat_pay' then t.amount else 0 end), 2) pat_pay,
+            round(sum(t.amount), 2) total
+        from trans t
+        left join patients p on t.guar_id = p.guarantor
+        where eff_time >= {{prod_limit_start}} and eff_time <= {{prod_limit_end}}
+        group by 
+            strftime(t.eff_time, '%Y-%m'),
+            t.guar_id,
+            t.location_id
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: prod_pat_bal
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: bd_adj
+            renameTo: null
+            size: 89
+            wrapText: null
+            displayFormat: null
+          - originalName: discount_adj
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: eff_month
+            renameTo: null
+            size: 108
+            wrapText: null
+            displayFormat: null
+          - originalName: family_name
+            renameTo: null
+            size: 147
+            wrapText: null
+            displayFormat: null
+          - originalName: given_name
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_adj
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_pay
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: insrefund_adj
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: od_id
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_pay
+            renameTo: null
+            size: 96
+            wrapText: null
+            displayFormat: null
+          - originalName: patrefund_adj
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat: null
+          - originalName: payplan_adj
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: prod
+            renameTo: null
+            size: 78
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: total
+            renameTo: null
+            size: 77
+            wrapText: null
+            displayFormat: null
+          - originalName: ucr_writeoff
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: unknown_adj
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-40514e147f7a # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: PROD - Office Balances
+    config:
+      source: |-
+        select
+            pb.eff_month,
+            o.officename,
+            pb.location_id,
+            round(sum(pb.prod), 2) prod,
+            round(sum(pb.ucr_writeoff), 2) ucr_writeoff,
+            round(sum(pb.ins_adj), 2) ins_adj,
+            round(sum(pb.discount_adj), 2) discount_adj,
+            round(sum(pb.bd_adj), 2) bd_adj,
+            round(sum(pb.payplan_adj), 2) payplan_adj,
+            round(sum(pb.insrefund_adj), 2) insrefund_adj,
+            round(sum(pb.patrefund_adj), 2) patrefund_adj,
+            round(sum(pb.ins_pay), 2) ins_pay,
+            round(sum(pb.pat_pay), 2) pat_pay,
+            round(sum(pb.unknown_adj), 2) unknown_adj,
+            round(sum(pb.total), 2) change_in_bal
+        from prod_pat_bal pb
+        left join offices o on pb.location_id = o.oid
+        group by 
+            pb.eff_month,
+            o.officename,
+            pb.location_id
+        order by o.officename, pb.eff_month
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: prod_office_bal
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs:
+          calcColumns: []
+          referencedColumns: []
+          referencedParamTypes: {}
+          referencedColumnTypes: {}
+        filters: null
+        columnProperties:
+          - originalName: bd_adj
+            renameTo: null
+            size: 89
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: change_in_bal
+            renameTo: null
+            size: 130
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: discount_adj
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: eff_month
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_adj
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_pay
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: insrefund_adj
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: location_id
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: net_prod
+            renameTo: null
+            size: null
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: officename
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_pay
+            renameTo: null
+            size: 98
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: patrefund_adj
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: payplan_adj
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: prod
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: ucr_writeoff
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: unknown_adj
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+        columnOrdering: null
+        customColumnOrdering:
+          - eff_month
+          - officename
+          - location_id
+          - prod
+          - ucr_writeoff
+          - discount_adj
+          - bd_adj
+          - payplan_adj
+          - insrefund_adj
+          - patrefund_adj
+          - unknown_adj
+          - ins_pay
+          - pat_pay
+          - change_in_bal
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            ins_pay:
+              - Sum
+            pat_pay:
+              - Sum
+            change_in_bal:
+              - Sum
+  - cellType: TABLE_DISPLAY
+    cellId: 019bc3af-f0ce-7005-b510-ea34eaecfbfb # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Production Report
+    config:
+      dataFrameVariableName: prod_office_bal
+      resultVariable: table_result
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs:
+          calcColumns:
+            - name: net_prod
+              expression: prod+ucr_writeoff+discount_adj+bd_adj+payplan_adj+unknown_adj+ins_adj
+          referencedColumns:
+            - columnId: prod
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: ucr_writeoff
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: discount_adj
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: bd_adj
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: payplan_adj
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: unknown_adj
+              columnType: NUMBER
+              containsAggregate: false
+            - columnId: ins_adj
+              columnType: NUMBER
+              containsAggregate: false
+          referencedParamTypes: {}
+          referencedColumnTypes:
+            prod: NUMBER
+            bd_adj: NUMBER
+            ins_adj: NUMBER
+            payplan_adj: NUMBER
+            unknown_adj: NUMBER
+            discount_adj: NUMBER
+            ucr_writeoff: NUMBER
+        filters: []
+        columnProperties:
+          - originalName: bd_adj
+            renameTo: null
+            size: 123
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: change_in_bal
+            renameTo: null
+            size: 129
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: discount_adj
+            renameTo: null
+            size: 134
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: eff_month
+            renameTo: null
+            size: 107
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_adj
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_pay
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: insrefund_adj
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: location_id
+            renameTo: null
+            size: 113
+            wrapText: null
+            displayFormat: null
+          - originalName: net_prod
+            renameTo: null
+            size: 150
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: officename
+            renameTo: null
+            size: 184
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_pay
+            renameTo: null
+            size: 143
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: patrefund_adj
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: payplan_adj
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: prod
+            renameTo: null
+            size: 136
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: ucr_writeoff
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: unknown_adj
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+        columnOrdering: null
+        customColumnOrdering:
+          - eff_month
+          - officename
+          - location_id
+          - prod
+          - ucr_writeoff
+          - discount_adj
+          - bd_adj
+          - payplan_adj
+          - insrefund_adj
+          - patrefund_adj
+          - ins_adj
+          - unknown_adj
+          - net_prod
+          - ins_pay
+          - pat_pay
+          - change_in_bal
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            prod:
+              - Sum
+            bd_adj:
+              - Sum
+            ins_pay:
+              - Sum
+            pat_pay:
+              - Sum
+            net_prod:
+              - Sum
+            payplan_adj:
+              - Sum
+            unknown_adj:
+              - Sum
+            discount_adj:
+              - Sum
+            ucr_writeoff:
+              - Sum
+            change_in_bal:
+              - Sum
+            insrefund_adj:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-4dcc9d8e6f35 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Backup Filtered Trans
+    config:
+      source: |-
+        -- select
+        --     {{ar_date}} ar_date,
+        --     t.warehouse_id,
+        --     t.guar_id,
+        --     t.location_id,
+        --     t.t_id,
+        --     t.eff_time,
+        --     t.tran_type,
+        --     t.amount,
+        --     0 ins_est
+        -- from trans t
+        -- where t.eff_time < {{ar_date}}
+        -- -- and guar_id = '9035290'
+
+        -- union all
+
+        -- select
+        --     {{ar_date}} ar_date,
+        --     c.warehouse_id,
+        --     c.guar_id,
+        --     c.location_id,
+        --     null as t_id,
+        --     c.submit_time as eff_time,
+        --     'ins_est' as tran_type,
+        --     0 as amount,
+        --     -(case when c.state = 'CLOSED' then c.total_paid_amount else c.estimated_insurance_payment end) as ins_est
+        -- from enriched_claims c 
+        -- where c.state in ('CREATED', 'SUBMITTED', 'CLOSED')
+        -- and c.submit_time is not null
+        -- and c.submit_time < {{ar_date}}
+        -- and (case 
+        --     when c.state in ('CREATED', 'SUBMITTED') then cast({{ar_date}} + interval 1 day as date) -- include all claims still in submitted status
+        --     when c.pay_time is null and c.state = 'CLOSED' then c.update_time -- if a claim was "paid" but we didn't receive a payment, go based on update_time
+        --     else c.pay_time -- most claims have been paid normally, and will use this option
+        -- end) > {{ar_date}}
+        -- -- and guar_id = '9035290'
+
+        -- order by eff_time desc
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: bft
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: row-index-0
+            renameTo: null
+            size: 28
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-561b96d229bc # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - Filtered Trans
+    config:
+      source: |-
+        select
+            {{ar_date}} ar_date,
+            t.warehouse_id,
+            t.guar_id,
+            t.location_id,
+            t.t_id,
+            t.eff_time,
+            t.tran_type,
+            t.amount,
+            0 ins_est
+        from trans t
+        where t.eff_time < {{ar_date}}
+        -- and guar_id = '9035290'
+
+        union all
+
+        select
+            {{ar_date}} ar_date,
+            c.warehouse_id,
+            c.guar_id,
+            c.location_id,
+            null as t_id,
+            c.submit_time as eff_time,
+            'ins_est' as tran_type,
+            0 as amount,
+            -(case when c.state = 'CLOSED' then c.total_paid_amount else c.estimated_insurance_payment end) as ins_est
+        from enriched_claims c 
+        where c.state in ('CREATED', 'SUBMITTED', 'CLOSED')
+        and c.submit_time is not null
+        and c.submit_time < {{ar_date}}
+        and (case 
+            when c.state in ('CREATED', 'SUBMITTED') then cast({{ar_date}} + interval 1 day as date) -- include all claims still in submitted status
+            when c.pay_time is null and c.state = 'CLOSED' then c.update_time -- if a claim was "paid" but we didn't receive a payment, go based on update_time
+            else c.pay_time -- most claims have been paid normally, and will use this option
+        end) > {{ar_date}}
+        -- and guar_id = '9035290'
+
+        order by eff_time desc
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: ftrans
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: amount
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: custom_type
+            renameTo: null
+            size: 122
+            wrapText: null
+            displayFormat: null
+          - originalName: eff_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 145
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: kolla_id
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: t_id
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: tran_type
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: warehouse_id
+            renameTo: null
+            size: 127
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            amount:
+              - Sum
+            ins_est:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-59f5909a31f0 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - Group by Proc
+    config:
+      source: |-
+        select -- grabbing all procedures, and applying adjustments and payments to them
+            p.ar_date,
+            p.warehouse_id,
+            p.guar_id,
+            p.location_id,
+            p.t_id,
+            p.eff_time,
+            p.tran_type,
+            max(p.amount) + sum(t.amount) as amount,
+            p.ins_est
+        from ftrans p
+        left join ftrans t on p.warehouse_id = t.t_id -- and t.tran_type != 'proc'
+        where p.tran_type = 'proc'
+        group by
+            p.ar_date,
+            p.warehouse_id,
+            p.guar_id,
+            p.location_id,
+            p.t_id,
+            p.eff_time,
+            p.tran_type,
+            p.amount,
+            p.ins_est
+
+        union all
+
+        select -- grabbing all adjustments and payments not allocated to procedures
+            t.*
+        from ftrans t
+        left join ftrans p on t.t_id = p.warehouse_id
+        where t.tran_type != 'proc'
+        and p.warehouse_id is null
+
+        order by eff_time desc
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: ar_proc
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: amount
+            renameTo: null
+            size: 158
+            wrapText: null
+            displayFormat: null
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: eff_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: t_id
+            renameTo: null
+            size: 82
+            wrapText: null
+            displayFormat: null
+          - originalName: tran_type
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: warehouse_id
+            renameTo: null
+            size: 127
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            amount:
+              - Sum
+            ins_est:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-621dfe55c971 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - Group by Date
+    config:
+      source: |-
+        select 
+            t.ar_date,
+            max(t.location_id) location_id,
+            t.guar_id,
+            max(p.given_name) given_name,
+            max(p.family_name) family_name,
+            t.eff_time,
+            (case 
+                when min(t.eff_time) < (t.ar_date - 120) then '120+'
+                when min(t.eff_time) < (t.ar_date - 90) then '91-120'
+                when min(t.eff_time) < (t.ar_date - 60) then '61-90'
+                when min(t.eff_time) < (t.ar_date - 30) then '31-60'
+                else '0-30' 
+            end) aging,
+            round(sum(case when t.tran_type = 'proc' then t.amount else 0 end), 2) prod,
+            round(sum(case when t.tran_type = 'ucr_writeoff' then t.amount else 0 end), 2) ucr_writeoff,
+            round(sum(case when t.tran_type = 'ins_adj' then t.amount else 0 end), 2) ins_adj,
+            round(sum(case when t.tran_type = 'bd_adj' then t.amount else 0 end), 2) bd_adj,
+            round(sum(case when t.tran_type = 'discount_adj' then t.amount else 0 end), 2) discount_adj,
+            round(sum(case when t.tran_type = 'patrefund_adj' then t.amount else 0 end), 2) patrefund_adj,
+            round(sum(case when t.tran_type = 'insrefund_adj' then t.amount else 0 end), 2) insrefund_adj,
+            round(sum(case when t.tran_type = 'payplan_adj' then t.amount else 0 end), 2) payplan_adj,
+            round(sum(case when t.tran_type = 'unknown_adj' then t.amount else 0 end), 2) unknown_adj,
+            round(sum(case when t.tran_type = 'pat_pay' then t.amount else 0 end), 2) pat_pay,
+            round(sum(case when t.tran_type = 'ins_pay' then t.amount else 0 end), 2) ins_pay,
+            round(sum(t.amount), 2) balance,
+            round(sum(t.ins_est), 2) ins_est
+        from ar_proc t
+        left join patients p on t.guar_id = p.guarantor
+        where t.amount != 0 or t.ins_est != 0
+        group by
+            t.ar_date,
+            t.guar_id,
+            t.eff_time
+        order by t.eff_time desc
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: ar_dos
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: aging
+            renameTo: null
+            size: 81
+            wrapText: null
+            displayFormat: null
+          - originalName: amount
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: balance
+            renameTo: null
+            size: 178
+            wrapText: null
+            displayFormat: null
+          - originalName: bd_adj
+            renameTo: null
+            size: 89
+            wrapText: null
+            displayFormat: null
+          - originalName: custom_type
+            renameTo: null
+            size: 122
+            wrapText: null
+            displayFormat: null
+          - originalName: discount_adj
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: eff_time
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: family_name
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: given_name
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 93
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_adj
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 155
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              nanFormat: "null"
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_pay
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: insrefund_adj
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: kolla_id
+            renameTo: null
+            size: 94
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_pay
+            renameTo: null
+            size: 96
+            wrapText: null
+            displayFormat: null
+          - originalName: patrefund_adj
+            renameTo: null
+            size: 128
+            wrapText: null
+            displayFormat: null
+          - originalName: payplan_adj
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: prod
+            renameTo: null
+            size: 77
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: t_id
+            renameTo: null
+            size: 73
+            wrapText: null
+            displayFormat: null
+          - originalName: tran_type
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: ucr_writeoff
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: unknown_adj
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            prod:
+              - Sum
+            balance:
+              - Sum
+            ins_est:
+              - Sum
+            ins_pay:
+              - Sum
+            pat_pay:
+              - Sum
+            patrefund_adj:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c6-7005-b50f-6be369b25dbc # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - Patient Aging Breakdown
+    config:
+      source: |-
+        select
+            p.ar_date,
+            p.given_name,
+            p.family_name,
+            p.guar_id,
+            p.location_id,
+            sum(case when p.aging = '120+' then p.ins_est else 0 end) ins_over_120,
+            sum(case when p.aging = '91-120' then p.ins_est else 0 end) ins_91_120,
+            sum(case when p.aging = '61-90' then p.ins_est else 0 end) ins_61_90,
+            sum(case when p.aging = '31-60' then p.ins_est else 0 end) ins_31_60,
+            sum(case when p.aging = '0-30' then p.ins_est else 0 end) ins_0_30,
+            sum(case when p.balance > 0 and p.aging = '120+' then p.balance else 0 end) pat_over_120,
+            sum(case when p.balance > 0 and p.aging = '91-120' then p.balance else 0 end) pat_91_120,
+            sum(case when p.balance > 0 and p.aging = '61-90' then p.balance else 0 end) pat_61_90,
+            sum(case when p.balance > 0 and p.aging = '31-60' then p.balance else 0 end) pat_31_60,
+            sum(case when p.balance > 0 and p.aging = '0-30' then p.balance else 0 end) pat_0_30,
+            sum(case when p.balance < 0 then p.balance else 0 end) payments,
+            sum(p.balance) balance,
+            sum(p.ins_est) ins_est,
+            sum(p.balance + p.ins_est) pat_resp,
+            sum(case when p.balance < 0 then p.balance else 0 end + p.ins_est) unapplied_credits,
+        from ar_dos p
+        group by
+            p.ar_date,
+            p.given_name,
+            p.family_name,
+            p.guar_id,
+            p.location_id
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: aging_breakdown
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: balance
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: family_name
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: given_name
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_0_30
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_31_60
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_61_90
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_91_120
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_over_120
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_0_30
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_31_60
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_61_90
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_91_120
+            renameTo: null
+            size: 119
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_over_120
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_resp
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: payments
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: unapplied_credits
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c7-7005-b50f-726e4ff3a326 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - True Patient Aging
+    config:
+      source: |-
+        -- This is some tricky sql that applies payments and ins estimates to each aging bucket starting with 120+ until it runs out
+        select
+            ab.ar_date,
+            ab.given_name,
+            ab.family_name,
+            ab.guar_id,
+            ab.location_id,
+            -ab.ins_over_120 ins_over_120,
+            -ab.ins_91_120 ins_91_120,
+            -ab.ins_61_90 ins_61_90,
+            -ab.ins_31_60 ins_31_60,
+            -ab.ins_0_30 ins_0_30,
+            (case 
+                when ab.pat_over_120 > -ab.unapplied_credits then ab.pat_over_120 + ab.unapplied_credits -- When the payment will not or only partially reduce the value of the first bucket
+                else 0 -- When the payment will eliminate the value of the first bucket
+            end) pat_over_120,
+            (case 
+                when ab.pat_over_120 >= -ab.unapplied_credits then ab.pat_91_120 -- When the unapplied_credits have already been exhaused on other buckets
+                when ab.pat_over_120 + ab.pat_91_120 > -ab.unapplied_credits  then ab.pat_over_120 + ab.pat_91_120 + ab.unapplied_credits -- When a payment will reduce the value of the current bucket but not eliminate it
+                else 0 -- When a payment will eliminate the value of the current bucket
+            end) pat_91_120,
+            (case 
+                when ab.pat_over_120 + ab.pat_91_120 >= -ab.unapplied_credits then ab.pat_61_90
+                when ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 > -ab.unapplied_credits then ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.unapplied_credits 
+                else 0
+            end) pat_61_90,
+            (case 
+                when ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 >= -ab.unapplied_credits then ab.pat_31_60
+                when ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 > -ab.unapplied_credits then ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 + ab.unapplied_credits 
+                else 0 
+            end) pat_31_60,
+            (case 
+                when ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 >= -ab.unapplied_credits then ab.pat_0_30
+                when ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 + ab.pat_0_30 > -ab.unapplied_credits then ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 + ab.pat_0_30 + ab.unapplied_credits 
+                else 0 
+            end) pat_0_30,
+            round(case when balance < 0 then ab.unapplied_credits + ab.pat_over_120 + ab.pat_91_120 + ab.pat_61_90 + ab.pat_31_60 + ab.pat_0_30 else 0 end, 2) outstanding_credits,
+            ab.balance,
+            ab.ins_est,
+            ab.pat_resp
+        from aging_breakdown ab
+        where balance != 0
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: pat_aging
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: ins_over_120
+        defaultSortIndexColumn: null
+        defaultSortDirection: DESC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: balance
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: family_name
+            renameTo: null
+            size: 121
+            wrapText: null
+            displayFormat: null
+          - originalName: given_name
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: guar_id
+            renameTo: null
+            size: 92
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_0_30
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_31_60
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_61_90
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_91_120
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_over_120
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: outstanding_credits
+            renameTo: null
+            size: 160
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_0_30
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_31_60
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_61_90
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_91_120
+            renameTo: null
+            size: 119
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_over_120
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_resp
+            renameTo: null
+            size: 162
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            balance:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c7-7005-b50f-781f235e3cfb # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: AR - Office Aging
+    config:
+      source: |-
+        select
+            pa.ar_date,
+            o.officename,
+            pa.location_id,
+            round(sum(pa.ins_over_120), 2) ins_over_120,
+            round(sum(pa.ins_91_120), 2) ins_91_120,
+            round(sum(pa.ins_61_90), 2) ins_61_90,
+            round(sum(pa.ins_31_60), 2) ins_31_60,
+            round(sum(pa.ins_0_30), 2) ins_0_30,
+            round(sum(pa.pat_over_120), 2) pat_over_120,
+            round(sum(pa.pat_91_120), 2) pat_91_120,
+            round(sum(pa.pat_61_90), 2) pat_61_90,
+            round(sum(pa.pat_31_60), 2) pat_31_60,
+            round(sum(pa.pat_0_30), 2) pat_0_30,
+            round(sum(case when pa.balance > 0 then pa.balance else 0 end), 2) ar_no_ins,
+            round(sum(case when pa.balance < 0 then pa.balance else 0 end), 2) ur_no_ins,
+            -round(sum(pa.ins_est), 2) ins_est,
+            round(sum(case when pa.pat_resp > 0 then pa.pat_resp else 0 end), 2) pat_resp,
+            round(sum(case when pa.pat_resp < 0 then pa.pat_resp else 0 end), 2) us_with_ins
+        from pat_aging pa
+        left join offices o on pa.location_id = o.oid
+        group by
+            pa.ar_date,
+            o.officename,
+            pa.location_id
+        order by location_id, ar_date
+      dataFrameCell: true
+      dataConnectionId: null
+      resultVariableName: office_aging
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: ar_no_ins
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_0_30
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_31_60
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_61_90
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_91_120
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_est
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat: null
+          - originalName: ins_over_120
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat: null
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: officename
+            renameTo: null
+            size: 150
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_0_30
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_31_60
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_61_90
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_91_120
+            renameTo: null
+            size: 119
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_over_120
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_resp
+            renameTo: null
+            size: 100
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 46
+            wrapText: null
+            displayFormat: null
+          - originalName: ur_no_ins
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat: null
+          - originalName: us_with_ins
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: TABLE_DISPLAY
+    cellId: 019bc3af-f0ce-7005-b510-f1e2de6aa538 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: Custom Aging Report
+    config:
+      dataFrameVariableName: office_aging
+      resultVariable: table_result_2
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ar_date
+            renameTo: null
+            size: 99
+            wrapText: null
+            displayFormat: null
+          - originalName: ar_no_ins
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_0_30
+            renameTo: null
+            size: 102
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_31_60
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_61_90
+            renameTo: null
+            size: 110
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_91_120
+            renameTo: null
+            size: 117
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_est
+            renameTo: null
+            size: 90
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: ins_over_120
+            renameTo: null
+            size: 124
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: location_id
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat: null
+          - originalName: officename
+            renameTo: null
+            size: 150
+            wrapText: null
+            displayFormat: null
+          - originalName: pat_0_30
+            renameTo: null
+            size: 105
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: pat_31_60
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: pat_61_90
+            renameTo: null
+            size: 112
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: pat_91_120
+            renameTo: null
+            size: 119
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: pat_over_120
+            renameTo: null
+            size: 126
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: pat_resp
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: row-index-0
+            renameTo: null
+            size: 65
+            wrapText: null
+            displayFormat: null
+          - originalName: ur_no_ins
+            renameTo: null
+            size: 133
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+          - originalName: us_with_ins
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat:
+              format: CURRENCY
+              currency: USD
+              columnType: NUMBER
+              showSeparators: true
+              numDecimalDigits: 2
+              abbreviateLargeNumbers: false
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: true
+        columnAggregations:
+          columnAggregations:
+            ins_est:
+              - Sum
+            ins_0_30:
+              - Sum
+            pat_0_30:
+              - Sum
+            pat_resp:
+              - Sum
+            ar_no_ins:
+              - Sum
+            ins_31_60:
+              - Sum
+            ins_61_90:
+              - Sum
+            pat_31_60:
+              - Sum
+            pat_61_90:
+              - Sum
+            ur_no_ins:
+              - Sum
+            ins_91_120:
+              - Sum
+            pat_91_120:
+              - Sum
+            us_with_ins:
+              - Sum
+            ins_over_120:
+              - Sum
+            pat_over_120:
+              - Sum
+  - cellType: SQL
+    cellId: 019bc3af-f0c7-7005-b50f-839821c72095 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: ledger OID <> payalloc OID
+    config:
+      source: |-
+        select top 500
+            lpa.[OID] as payalloc_oid,
+            l.[OID] as ledger_oid,
+            rp.[OID] as rp_oid,
+            l.[DESCR],
+            lpa.[AMOUNT] as lpa_amount,
+            lpa.[ALLOCDATE],
+            l.[DOSDATE],
+            l.[TRANDATE]
+        from [denticon].[LEDGERPAYALLOC] lpa
+        left join [denticon].[LEDGER] l on lpa.[PAYLEDGERID] = l.[LEDGERID] --P, I, A
+        left join [denticon].[RESPPARTY] rp on l.[RPID] = rp.[RPID]  -- respparty
+        where lpa.[OID] <> l.[OID] and lpa.[OID] <> rp.[OID]-- where payalloc oid is not the same as ledger oid
+        and l.[TRANDATE] > '2025-01-01'
+        order by l.[TRANDATE]
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_64
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ALLOCDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 181
+            wrapText: null
+            displayFormat: null
+          - originalName: DOSDATE
+            renameTo: null
+            size: 135
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: ledger_oid
+            renameTo: null
+            size: 108
+            wrapText: null
+            displayFormat: null
+          - originalName: lpa_amount
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: payalloc_oid
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 47
+            wrapText: null
+            displayFormat: null
+          - originalName: rp_oid
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+  - cellType: SQL
+    cellId: 019bc3af-f0c7-7005-b50f-8be4a9be52a5 # DO NOT CHANGE - Hex uses this to match up cells when reimporting the file, and detect any changes to existing cells
+    cellLabel: respparty OID = payalloc OID
+    config:
+      source: |-
+        with oid_cte as (select top 10000
+            lpa.[OID] as payalloc_oid,
+            l.[OID] as ledger_oid,
+            rp.[OID] as rp_oid,
+            l.[DESCR],
+            lpa.[AMOUNT] as lpa_amount,
+            lpa.[ALLOCDATE],
+            l.[DOSDATE],
+            l.[TRANDATE]
+        from [denticon].[LEDGERPAYALLOC] lpa
+        left join [denticon].[LEDGER] l on lpa.[PAYLEDGERID] = l.[LEDGERID] --P, I, A
+        left join [denticon].[RESPPARTY] rp on l.[RPID] = rp.[RPID]  -- respparty
+        where rp.[OID] = lpa.[OID] -- where payalloc oid is not the same as ledger oid
+        and l.[TRANDATE] > '2025-01-01'
+        order by l.[TRANDATE])
+
+        select *
+        from oid_cte oid
+        where oid.payalloc_oid = oid.ledger_oid and oid.ledger_oid = oid.rp_oid
+
+        --when respparty is the same as payalloc oid, almost everything aligns.
+      dataFrameCell: false
+      dataConnectionId: null
+      resultVariableName: dataframe_65
+      useRichDisplay: true
+      enablePreview: true
+      sqlCellOutputType: PANDAS
+      useQueryMode: false
+      castDecimals: true
+      useNativeDates: true
+      outputFilteredResult: true
+      allowDuplicateColumns: false
+      tableDisplayConfig:
+        pageSize: 50
+        height: null
+        hideIcons: false
+        defaultColumnWidth: null
+        hideIndex: false
+        defaultSortColumn: null
+        defaultSortIndexColumn: null
+        defaultSortDirection: ASC
+        conditionalFormatting: null
+        calcs: null
+        filters: null
+        columnProperties:
+          - originalName: ALLOCDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: DESCR
+            renameTo: null
+            size: 181
+            wrapText: null
+            displayFormat: null
+          - originalName: DOSDATE
+            renameTo: null
+            size: 104
+            wrapText: null
+            displayFormat: null
+          - originalName: TRANDATE
+            renameTo: null
+            size: 196
+            wrapText: null
+            displayFormat: null
+          - originalName: ledger_oid
+            renameTo: null
+            size: 108
+            wrapText: null
+            displayFormat: null
+          - originalName: lpa_amount
+            renameTo: null
+            size: 116
+            wrapText: null
+            displayFormat: null
+          - originalName: payalloc_oid
+            renameTo: null
+            size: 120
+            wrapText: null
+            displayFormat: null
+          - originalName: row-index-0
+            renameTo: null
+            size: 47
+            wrapText: null
+            displayFormat: null
+          - originalName: rp_oid
+            renameTo: null
+            size: 85
+            wrapText: null
+            displayFormat: null
+        columnOrdering: null
+        customColumnOrdering: null
+        pinnedColumns: null
+        hiddenColumns: null
+        pinIndexColumns: false
+        showAggregations: false
+        columnAggregations: null
+appLayout:
+  visibleMetadataFields:
+    - NAME
+    - DESCRIPTION
+    - AUTHOR
+    - LAST_EDITED
+    - LAST_RUN
+    - CATEGORIES
+    - STATUS
+    - TABLE_OF_CONTENTS
+  fullWidth: true
+  tabs:
+    - name: Tab 1
+      rows:
+        - columns:
+            - start: 0
+              end: 30
+              elements:
+                - showSource: false
+                  hideOutput: false
+                  type: CELL
+                  cellId: 019bc3af-f03a-7005-b4f9-056e847e50d5
+                  sharedFilterId: null
+                  height: null
+                  showLabel: true
+                  explorable: null
+            - start: 30
+              end: 60
+              elements:
+                - showSource: false
+                  hideOutput: false
+                  type: CELL
+                  cellId: 019bc3af-f03a-7005-b4f9-0b781b0e756a
+                  sharedFilterId: null
+                  height: null
+                  showLabel: true
+                  explorable: null
+        - columns:
+            - start: 0
+              end: 120
+              elements:
+                - showSource: false
+                  hideOutput: false
+                  type: CELL
+                  cellId: 019bc3af-f0ce-7005-b510-ea34eaecfbfb
+                  sharedFilterId: null
+                  height: null
+                  showLabel: true
+                  explorable: null
+        - columns:
+            - start: 0
+              end: 120
+              elements:
+                - showSource: false
+                  hideOutput: false
+                  type: CELL
+                  cellId: 019bc3af-f0ce-7005-b510-f1e2de6aa538
+                  sharedFilterId: null
+                  height: null
+                  showLabel: true
+                  explorable: null
+sharedFilters: []
